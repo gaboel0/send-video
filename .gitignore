@@ -4,7 +4,9 @@ dist/
 .env.local
 *.log
 .data/
-storage/
+# vídeos enviados em desenvolvimento (não o módulo src/modules/storage)
+/storage/
+/apps/api/storage/
 apps/api/src/generated/
 coverage/
 *.tsbuildinfo
