@@ -1,0 +1,32 @@
+{
+  "name": "sendvideo",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Central de agendamento e publicação de vídeos (TikTok, Instagram, Facebook)",
+  "workspaces": [
+    "apps/*"
+  ],
+  "scripts": {
+    "db:local": "npm run db:local -w @sendvideo/api",
+    "db:migrate": "npm run db:migrate -w @sendvideo/api",
+    "dev": "concurrently -k -n api,worker,web -c blue,magenta,green \"npm run dev -w @sendvideo/api\" \"npm run dev:worker -w @sendvideo/api\" \"npm run dev -w @sendvideo/web\"",
+    "build": "npm run build -w @sendvideo/api && npm run build -w @sendvideo/web",
+    "start": "npm run start -w @sendvideo/api",
+    "start:worker": "npm run start:worker -w @sendvideo/api",
+    "typecheck": "npm run typecheck -w @sendvideo/api && npm run typecheck -w @sendvideo/web",
+    "test": "npm run test -w @sendvideo/api"
+  },
+  "devDependencies": {
+    "concurrently": "^9.2.1"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "allowScripts": {
+    "prisma@7.10.1": true,
+    "@prisma/engines@7.10.1": true,
+    "esbuild@0.28.2": true,
+    "@embedded-postgres/windows-x64@18.6.0-beta.19": true,
+    "msgpackr-extract@3.0.7": true
+  }
+}

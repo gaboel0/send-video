@@ -1,0 +1,67 @@
+# Ambiente completo de produção (ou staging) em um servidor com Docker.
+# Uso:  cp .env.example .env  (preencha)  &&  docker compose up -d --build
+# Coloque um proxy HTTPS (Caddy, Traefik, Nginx) na frente da porta 4000:
+# o TikTok exige HTTPS na URL de retorno do OAuth.
+
+services:
+  postgres:
+    image: postgres:17
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: sendvideo
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-troque-esta-senha}
+      POSTGRES_DB: sendvideo
+      POSTGRES_INITDB_ARGS: --encoding=UTF8 --locale=C.UTF-8
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U sendvideo']
+      interval: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    # AOF: a fila sobrevive a reinícios do Redis (o banco continua sendo a fonte da verdade)
+    command: ['redis-server', '--appendonly', 'yes', '--maxmemory-policy', 'noeviction']
+    volumes:
+      - redisdata:/data
+
+  api:
+    build: .
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      NODE_ENV: production
+      DATABASE_URL: postgresql://sendvideo:${POSTGRES_PASSWORD:-troque-esta-senha}@postgres:5432/sendvideo
+      REDIS_URL: redis://redis:6379
+      QUEUE_DRIVER: bullmq
+      STORAGE_LOCAL_DIR: /data/storage
+    volumes:
+      - storage:/data/storage
+    ports:
+      - '4000:4000'
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis: { condition: service_started }
+
+  worker:
+    build: .
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      NODE_ENV: production
+      DATABASE_URL: postgresql://sendvideo:${POSTGRES_PASSWORD:-troque-esta-senha}@postgres:5432/sendvideo
+      REDIS_URL: redis://redis:6379
+      QUEUE_DRIVER: bullmq
+      STORAGE_LOCAL_DIR: /data/storage
+    volumes:
+      - storage:/data/storage
+    command: ['node', 'apps/api/dist/worker.js']
+    depends_on:
+      api: { condition: service_started }
+
+volumes:
+  pgdata:
+  redisdata:
+  storage:

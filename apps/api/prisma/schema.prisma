@@ -1,0 +1,325 @@
+// SendVideo: modelo de dados
+// Todas as datas são armazenadas em UTC. A conversão para America/Sao_Paulo
+// acontece na borda (API de agenda e interface).
+
+generator client {
+  provider     = "prisma-client"
+  output       = "../src/generated/prisma"
+  moduleFormat = "esm"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+enum Provider {
+  TIKTOK
+  META
+}
+
+enum Platform {
+  TIKTOK
+  INSTAGRAM
+  FACEBOOK
+}
+
+enum ConnectionStatus {
+  ACTIVE
+  EXPIRED
+  REVOKED
+  ERROR
+}
+
+/// Status de uma publicação (e de cada destino dela)
+enum PublishStatus {
+  DRAFT
+  SCHEDULED
+  QUEUED
+  PROCESSING
+  PUBLISHED
+  FAILED
+  NEEDS_ACTION
+  CANCELED
+}
+
+enum AttemptOutcome {
+  IN_PROGRESS
+  SUCCESS
+  CONTINUE
+  RETRY
+  FAILED
+  NEEDS_ACTION
+}
+
+enum LogLevel {
+  INFO
+  SUCCESS
+  WARNING
+  ERROR
+}
+
+// ── Autenticação ─────────────────────────────────────────────
+
+model User {
+  id           String   @id @default(cuid())
+  email        String   @unique
+  name         String
+  passwordHash String
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  sessions    Session[]
+  oauthStates OAuthState[]
+  connections SocialConnection[]
+  accounts    SocialAccount[]
+  folders     Folder[]
+  videos      Video[]
+  posts       Post[]
+  activities  ActivityLog[]
+}
+
+model Session {
+  id         String   @id @default(cuid())
+  /// SHA-256 do token; o token em si só existe no cookie do navegador
+  tokenHash  String   @unique
+  userId     String
+  user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  expiresAt  DateTime
+  userAgent  String?
+  ip         String?
+  createdAt  DateTime @default(now())
+  lastSeenAt DateTime @default(now())
+
+  @@index([userId])
+}
+
+/// Estado temporário do fluxo OAuth (proteção CSRF + PKCE)
+model OAuthState {
+  id           String   @id @default(cuid())
+  state        String   @unique
+  userId       String
+  user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  provider     Provider
+  codeVerifier String?
+  /// id da conexão a reconectar, quando for o caso
+  reconnectId  String?
+  expiresAt    DateTime
+  createdAt    DateTime @default(now())
+}
+
+// ── Contas sociais ───────────────────────────────────────────
+
+/// Uma autorização OAuth (um login no TikTok ou na Meta).
+/// Os tokens ficam criptografados (AES-256-GCM) e nunca saem do backend.
+model SocialConnection {
+  id                    String           @id @default(cuid())
+  userId                String
+  user                  User             @relation(fields: [userId], references: [id], onDelete: Cascade)
+  provider              Provider
+  /// open_id (TikTok) ou id do usuário Facebook (Meta)
+  externalUserId        String
+  displayName           String
+  avatarUrl             String?
+  accessTokenEnc        String
+  refreshTokenEnc       String?
+  accessTokenExpiresAt  DateTime?
+  refreshTokenExpiresAt DateTime?
+  scopes                String[]
+  status                ConnectionStatus @default(ACTIVE)
+  lastError             String?
+  lastSyncedAt          DateTime?
+  createdAt             DateTime         @default(now())
+  updatedAt             DateTime         @updatedAt
+
+  accounts SocialAccount[]
+
+  @@unique([userId, provider, externalUserId])
+}
+
+/// Um destino de publicação: perfil TikTok, conta profissional do Instagram ou página do Facebook.
+model SocialAccount {
+  id           String           @id @default(cuid())
+  userId       String
+  user         User             @relation(fields: [userId], references: [id], onDelete: Cascade)
+  connectionId String
+  connection   SocialConnection @relation(fields: [connectionId], references: [id], onDelete: Cascade)
+  platform     Platform
+  /// open_id (TikTok), ig-user-id (Instagram) ou page-id (Facebook)
+  externalId   String
+  name         String
+  username     String?
+  avatarUrl    String?
+  /// Token de página (Facebook/Instagram), criptografado. TikTok usa o token da conexão.
+  tokenEnc     String?
+  status       ConnectionStatus @default(ACTIVE)
+  /// Dados específicos (ex.: creator_info do TikTok, page-id ligado ao Instagram)
+  metadata     Json             @default("{}")
+  enabled      Boolean          @default(true)
+  lastSyncedAt DateTime?
+  createdAt    DateTime         @default(now())
+  updatedAt    DateTime         @updatedAt
+
+  targets PostTarget[]
+
+  @@unique([userId, platform, externalId])
+}
+
+// ── Biblioteca ───────────────────────────────────────────────
+
+model Folder {
+  id        String   @id @default(cuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  name      String
+  color     String   @default("slate")
+  createdAt DateTime @default(now())
+
+  videos Video[]
+
+  @@unique([userId, name])
+}
+
+model Video {
+  id           String    @id @default(cuid())
+  userId       String
+  user         User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  folderId     String?
+  folder       Folder?   @relation(fields: [folderId], references: [id], onDelete: SetNull)
+  title        String
+  description  String    @default("")
+  originalName String
+  storageKey   String
+  thumbnailKey String?
+  mimeType     String
+  sizeBytes    BigInt
+  durationSec  Float?
+  width        Int?
+  height       Int?
+  sha256       String
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+  deletedAt    DateTime?
+
+  posts Post[]
+
+  @@index([userId, deletedAt])
+}
+
+// ── Publicações ──────────────────────────────────────────────
+
+/// Uma publicação = um vídeo enviado para uma ou mais contas no mesmo horário.
+model Post {
+  id          String        @id @default(cuid())
+  userId      String
+  user        User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  videoId     String
+  video       Video         @relation(fields: [videoId], references: [id], onDelete: Restrict)
+  /// Nome interno (não é publicado)
+  title       String        @default("")
+  /// Horário agendado em UTC
+  scheduledAt DateTime?
+  /// Status agregado dos destinos (calculado)
+  status      PublishStatus @default(DRAFT)
+  createdAt   DateTime      @default(now())
+  updatedAt   DateTime      @updatedAt
+
+  targets    PostTarget[]
+  activities ActivityLog[]
+
+  @@index([userId, scheduledAt])
+  @@index([userId, status])
+}
+
+/// A publicação em uma conta específica, com legenda e opções próprias.
+model PostTarget {
+  id            String         @id @default(cuid())
+  postId        String
+  post          Post           @relation(fields: [postId], references: [id], onDelete: Cascade)
+  accountId     String
+  account       SocialAccount  @relation(fields: [accountId], references: [id], onDelete: Restrict)
+  platform      Platform
+  caption       String         @default("")
+  /// Sem o caractere #
+  hashtags      String[]
+  /// Opções específicas da plataforma (privacidade TikTok, formato Facebook...)
+  options       Json           @default("{}")
+  status        PublishStatus  @default(DRAFT)
+  attemptCount  Int            @default(0)
+  maxAttempts   Int            @default(5)
+  /// Quando o worker deve processar este destino (agendamento, nova tentativa ou consulta de status)
+  nextAttemptAt DateTime?
+  /// Trava de processamento: impede que dois workers processem o mesmo destino
+  leaseUntil    DateTime?
+  /// Etapa atual da máquina de estados do publicador
+  phase         String?
+  /// Ids intermediários (publish_id, container id, video id) para retomar sem duplicar
+  providerState Json?
+  externalId    String?
+  permalink     String?
+  lastErrorCode String?
+  lastError     String?
+  publishedAt   DateTime?
+  createdAt     DateTime       @default(now())
+  updatedAt     DateTime       @updatedAt
+
+  attempts   PublishAttempt[]
+  activities ActivityLog[]
+
+  @@unique([postId, accountId])
+  @@index([status, nextAttemptAt])
+}
+
+/// Histórico de cada execução do worker sobre um destino
+model PublishAttempt {
+  id           String         @id @default(cuid())
+  targetId     String
+  target       PostTarget     @relation(fields: [targetId], references: [id], onDelete: Cascade)
+  attemptNo    Int
+  phase        String?
+  outcome      AttemptOutcome @default(IN_PROGRESS)
+  errorCode    String?
+  errorMessage String?
+  details      Json?
+  startedAt    DateTime       @default(now())
+  finishedAt   DateTime?
+
+  @@index([targetId, startedAt])
+}
+
+// ── Logs ─────────────────────────────────────────────────────
+
+/// Linha do tempo exibida no painel (atividades recentes)
+model ActivityLog {
+  id        String      @id @default(cuid())
+  userId    String
+  user      User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+  postId    String?
+  post      Post?       @relation(fields: [postId], references: [id], onDelete: Cascade)
+  targetId  String?
+  target    PostTarget? @relation(fields: [targetId], references: [id], onDelete: Cascade)
+  type      String
+  level     LogLevel    @default(INFO)
+  message   String
+  createdAt DateTime    @default(now())
+
+  @@index([userId, createdAt])
+}
+
+/// Log técnico de cada chamada às APIs externas (sem tokens)
+model IntegrationLog {
+  id           String   @id @default(cuid())
+  userId       String?
+  provider     Provider
+  operation    String
+  method       String
+  url          String
+  statusCode   Int?
+  ok           Boolean
+  durationMs   Int
+  errorCode    String?
+  errorMessage String?
+  requestId    String?
+  createdAt    DateTime @default(now())
+
+  @@index([provider, createdAt])
+}
